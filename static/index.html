@@ -306,6 +306,8 @@
         <strong>k−1 时含原始行号与所用扩展界值的闭合冲突链</strong>：按环上原界权和与环长算出
         <strong>⌈−原界权和/环长⌉ = k</strong>，说明为何不能再缩小一分钟。
         原区间已可解时最小 k = 0；语法错误沿用逐行报错。
+        分钟为<strong>任意精度整数</strong>：无论多大的整数分钟（如 9007199254740993）都从求解、传输到页面运算与展示全程精确，
+        不截断、不转浮点（分钟字段以十进制字符串传输，页面按整数计算）。
       </p>
       <div class="button-row" style="margin-top:0">
         <button id="btn-tolerance" class="primary">求最小容差</button>

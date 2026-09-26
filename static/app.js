@@ -2244,6 +2244,11 @@ clockRecordsEl.addEventListener("input", () => {
 
 // ---------- 全局容差评估 ----------
 
+// 容差评估的分钟字段（k、时间线分钟、区间端点、富余、冲突链界值与权和）以十进制字符串
+// 传输：JSON 数值无法精确承载超过 2^53 的整数分钟（如 9007199254740993 会被
+// JSON.parse 舍入成 9007199254740992）。本面板一律用 BigInt 按整数运算与展示，
+// 不截断、不转浮点；计数（total_lines/event_count/cycle_length）与行号仍为数值。
+
 // 容差冲突链的标签：同时显示原界与 k−1 时实际使用的扩展界
 function toleranceStepTagHtml(s) {
   return `<span class="tag ${s.kind}">第 ${s.line} 行 · ${esc(s.kind_label)}：原界 ${s.original_bound} → 扩展界 ${s.expanded_bound}</span>`;
@@ -2270,6 +2275,11 @@ function toleranceConflictChainHtml(c) {
 
 function renderToleranceConflictBlock(bc) {
   const c = bc.conflict;
+  // 分钟字段为十进制字符串：证明公式中的取负与向上取整一律按整数（BigInt）计算
+  const originalWeightSum = BigInt(c.original_weight_sum);  // 环上原界权之和 W（< 0）
+  const cycleLength = BigInt(c.cycle_length);               // 环长 L（计数为数值，转整数参与运算）
+  const need = -originalWeightSum;                          // 需弥合的总分钟数 −W
+  const requiredK = (need + cycleLength - 1n) / cycleLength;  // ⌈−W/L⌉ 整数向上取整，恰为最小 k
   const detailRows = c.steps.map((s) => `
     <tr>
       <td class="num">第 ${s.line} 行</td>
@@ -2297,14 +2307,15 @@ function renderToleranceConflictBlock(bc) {
       </table>
       <p class="muted">环上 ${c.cycle_length} 条边的原界权之和为 <strong>${c.original_weight_sum} &lt; 0</strong>
       （原约束矛盾）；统一放宽 k 分钟使每条边权增加 k，环权变为 ${c.original_weight_sum} + ${c.cycle_length}k。
-      要使其 ≥ 0 需 k ≥ ⌈${-c.original_weight_sum}/${c.cycle_length}⌉ = <strong>${c.required_k}</strong>，
+      要使其 ≥ 0 需 k ≥ ⌈${need}/${c.cycle_length}⌉ = <strong>${requiredK}</strong>，
       恰为求出的最小容差；k−1 = ${c.slack_tested} 时环权仍为 ${c.weight_sum} &lt; 0，故不能再缩小。</p>
     </div>`;
 }
 
 function renderTolerance(data) {
-  const k = data.k;
-  const banner = k === 0
+  const k = BigInt(data.k);  // 最小统一容差（分钟，十进制字符串 → 整数）
+  const zero = k === 0n;     // 零容差分支：k = 0 表示原文已可行
+  const banner = zero
     ? `
     <div class="banner ok">
       <h2>✓ 最小容差 k = 0 分钟</h2>
@@ -2317,8 +2328,14 @@ function renderTolerance(data) {
     </div>`;
 
   const rowRows = data.rows.map((r) => {
-    const expFit = r.low - k <= r.actual && r.actual <= r.high + k;
-    const origFit = r.fits_original;
+    // 区间端点与差值均为十进制字符串，按整数（BigInt）判定满足情况，与表格展示一致
+    const low = BigInt(r.low);
+    const high = BigInt(r.high);
+    const expLow = BigInt(r.expanded_low);
+    const expHigh = BigInt(r.expanded_high);
+    const actual = BigInt(r.actual);
+    const origFit = low <= actual && actual <= high;
+    const expFit = expLow <= actual && actual <= expHigh;
     return `<tr${origFit ? "" : ' class="combo-conflict"'}>
       <td class="num">${r.line}</td>
       <td>${esc(r.a)} → ${esc(r.b)}</td>
@@ -2352,7 +2369,7 @@ function renderTolerance(data) {
 
   toleranceEl.innerHTML = banner
     + `<div class="card">
-         <h3>${k === 0 ? "原文的一条可行时间线" : `扩展 k = ${k} 分钟后的一条可行时间线`}</h3>
+         <h3>${zero ? "原文的一条可行时间线" : `扩展 k = ${k} 分钟后的一条可行时间线`}</h3>
          ${timelineTableHtml(data.timeline)}
        </div>`
     + rowsCard

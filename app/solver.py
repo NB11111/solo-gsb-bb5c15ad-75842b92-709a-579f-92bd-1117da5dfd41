@@ -102,7 +102,10 @@ k、一条平移到最早事件为第 0 分钟的扩展后可行时间线，以�
 本时间线实际差值。当 k>0 时，再对 k−1 联立一次并还原闭合冲突链：链中每环给出
 原始行号与 k−1 时实际使用的扩展界值（原上界+k−1 / 原下界−(k−1)）；该环原界值边权
 之和 W<0、环长 L，则每条边还需再放宽 1 分钟（共 L 分钟）方可弥合，环所需的最小
-统一容差为 ⌈−W/L⌉ = k，直接说明 k 不能再缩小。
+统一容差为 ⌈−W/L⌉ = k，直接说明 k 不能再缩小。返回中的分钟字段（k、时间线分钟、
+区间端点、富余、冲突链界值与权和等）一律为十进制字符串：求解全程使用任意精度
+整数，JSON 数值无法精确承载超过 2^53 的整数分钟，字符串传输保证页面端精确；
+计数与行号保持数值。
 """
 
 from __future__ import annotations
@@ -2572,6 +2575,39 @@ def solve_clock_alignment(text: str, records_text: str) -> dict:
 
 # ---------- 全局容差评估 ----------
 
+# /api/tolerance 的分钟字段：JSON 数值无法精确承载超过 2^53 的整数分钟
+#（如 9007199254740993 会被浏览器 JSON.parse 舍入成 9007199254740992），
+# 故分钟一律按十进制字符串传输，前端用整数（BigInt）运算与展示；
+# 计数（total_lines/event_count/cycle_length）与行号（line）保持数值。
+_TOLERANCE_MINUTE_KEYS = frozenset({
+    "k", "minute",
+    "low", "high", "expanded_low", "expanded_high", "low_shift", "high_shift",
+    "actual", "lower_slack", "upper_slack",
+    "weight", "bound", "original_bound", "expanded_bound", "slack",
+    "weight_sum", "original_weight_sum", "slack_tested", "required_k",
+})
+
+
+def _tolerance_minutes_to_strings(node):
+    """递归把容差结果中的分钟字段（_TOLERANCE_MINUTE_KEYS）转为十进制字符串。
+
+    计数与行号不在键集合中，保持数值；布尔与文本原样保留。求解全程使用
+    Python 任意精度整数，字符串化不改变数值，不截断、不转浮点。
+    """
+    if isinstance(node, dict):
+        return {
+            key: (
+                str(value)
+                if key in _TOLERANCE_MINUTE_KEYS and isinstance(value, int) and not isinstance(value, bool)
+                else _tolerance_minutes_to_strings(value)
+            )
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_tolerance_minutes_to_strings(item) for item in node]
+    return node
+
+
 def _tolerance_step(t: int):
     """构造把区间边标注为“扩展界值”的矛盾链步骤构建器（统一放宽 t 分钟时使用）。
 
@@ -2610,10 +2646,12 @@ def solve_tolerance(text: str) -> dict:
     与每行原区间、扩展区间、时间线实际差值及两端富余。k>0 时另对 k−1 联立还原闭合
     冲突链（每环含原始行号、原界与 k−1 时所用扩展界），由环原界权和 W 与环长 L 给出
     环所需的最小统一容差 ⌈−W/L⌉（恰好等于 k），说明 k 不能再缩小。
+    返回中的分钟字段（k、时间线分钟、区间端点、富余、冲突链界值与权和等）一律为
+    十进制字符串，保证任意大的整数分钟传输到页面仍精确；计数与行号保持数值。
     """
     # 空文本/只有空行：空约束集视为可行（与最少撤回同口径）
     if not text or not text.strip():
-        return {
+        return _tolerance_minutes_to_strings({
             "status": "ok",
             "k": 0,
             "original_feasible": True,
@@ -2623,7 +2661,7 @@ def solve_tolerance(text: str) -> dict:
             "rows": [],
             "event_count": 0,
             "blocking_conflict": None,
-        }
+        })
 
     rows, errors = parse_text(text)
     if errors:
@@ -2644,7 +2682,7 @@ def solve_tolerance(text: str) -> dict:
     # k=0：原文自身是否已可行
     base = run(0)
     if base["status"] == "ok":
-        return _tolerance_ok_result(rows, 0, base, original_feasible=True)
+        return _tolerance_minutes_to_strings(_tolerance_ok_result(rows, 0, base, original_feasible=True))
 
     # 指数放大找到第一个可行的 k（上界）；同时保留 k−1 求解用于后续冲突链
     lo, hi = 0, 1
@@ -2696,7 +2734,7 @@ def solve_tolerance(text: str) -> dict:
         ),
         "conflict": c,
     }
-    return result
+    return _tolerance_minutes_to_strings(result)
 
 
 def _tolerance_ok_result(rows: list[Row], k: int, system: dict, original_feasible: bool) -> dict:
