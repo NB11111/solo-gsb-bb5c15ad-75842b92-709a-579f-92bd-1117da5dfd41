@@ -103,6 +103,10 @@ k、一条平移到最早事件为第 0 分钟的扩展后可行时间线，以�
 原始行号与 k−1 时实际使用的扩展界值（原上界+k−1 / 原下界−(k−1)）；该环原界值边权
 之和 W<0、环长 L，则每条边还需再放宽 1 分钟（共 L 分钟）方可弥合，环所需的最小
 统一容差为 ⌈−W/L⌉ = k，直接说明 k 不能再缩小。
+分钟可能超出 JS Number 安全整数范围（如 9007199254740993）：求解全程任意精度整数，
+/api/tolerance 返回结构中的所有分钟字段（k、时间线分钟、区间端点、放宽量、实际差值、
+富余、冲突链边权与界值、环权之和、所需容差）一律以十进制字符串传输，计数与行号
+保持数值；不截断、不转浮点、不拒绝合法大整数。
 """
 
 from __future__ import annotations
@@ -2572,6 +2576,27 @@ def solve_clock_alignment(text: str, records_text: str) -> dict:
 
 # ---------- 全局容差评估 ----------
 
+# /api/tolerance 协议约定：所有“分钟”字段（k、时间线分钟、原/扩展区间端点、放宽量、
+# 实际差值、富余、冲突链的边权与界值、环权之和、所需容差等）一律以十进制字符串传输，
+# 计数（事件数、行数、环长）与行号保持数值。分钟可能超出 JS Number 的安全整数范围
+# （如 9007199254740993），数值传输会被前端 JSON.parse 转成双精度而丢失末位；
+# Python 端全程任意精度整数求解，仅在组装公开返回的边界处把分钟转为十进制字符串，
+# 不截断、不转浮点、不拒绝合法大整数；前端按 BigInt 整数运算后直接展示字符串。
+
+# 容差冲突链中按上述约定转为十进制字符串的分钟字段（行号 line 保持数值）
+_TOLERANCE_STEP_MINUTE_FIELDS = ("weight", "bound", "original_bound", "expanded_bound", "slack")
+_TOLERANCE_CONFLICT_MINUTE_FIELDS = ("weight_sum", "original_weight_sum", "slack_tested", "required_k")
+
+
+def _stringify_tolerance_conflict(conflict: dict) -> None:
+    """把容差冲突链结构中的分钟字段原地转为十进制字符串（计数与行号保持数值）。"""
+    for step in conflict["steps"]:
+        for key in _TOLERANCE_STEP_MINUTE_FIELDS:
+            step[key] = str(step[key])
+    for key in _TOLERANCE_CONFLICT_MINUTE_FIELDS:
+        conflict[key] = str(conflict[key])
+
+
 def _tolerance_step(t: int):
     """构造把区间边标注为“扩展界值”的矛盾链步骤构建器（统一放宽 t 分钟时使用）。
 
@@ -2610,12 +2635,16 @@ def solve_tolerance(text: str) -> dict:
     与每行原区间、扩展区间、时间线实际差值及两端富余。k>0 时另对 k−1 联立还原闭合
     冲突链（每环含原始行号、原界与 k−1 时所用扩展界），由环原界权和 W 与环长 L 给出
     环所需的最小统一容差 ⌈−W/L⌉（恰好等于 k），说明 k 不能再缩小。
+
+    分钟可能超出 JS Number 安全整数范围：返回结构中的所有分钟字段（k、时间线分钟、
+    区间端点、放宽量、实际差值、富余、冲突链边权与界值、环权之和、所需容差）一律
+    为十进制字符串，计数与行号保持数值；求解全程任意精度整数，仅在边界处转字符串。
     """
-    # 空文本/只有空行：空约束集视为可行（与最少撤回同口径）
+    # 空文本/只有空行：空约束集视为可行（与最少撤回同口径）；k 为分钟字段，按约定用十进制字符串
     if not text or not text.strip():
         return {
             "status": "ok",
-            "k": 0,
+            "k": "0",
             "original_feasible": True,
             "total_lines": 0,
             "message": "没有任何非空约束：空约束集视为可行，最小容差 k = 0（空时间线）。",
@@ -2686,28 +2715,37 @@ def solve_tolerance(text: str) -> dict:
     c["slack_tested"] = t
     c["required_k"] = required
 
+    # 说明文案先用精确整数生成（f-string 任意精度），随后再把结构中的分钟字段
+    # 统一转为十进制字符串（协议约定，见模块注释），文案与表格、公式保持一致
+    message = (
+        f"把统一容差缩小到 k−1 = {t} 分钟时，下列 {cycle_len} 条原始行（{t} 分钟扩展界）"
+        f"再次形成闭合负环：扩展界边权之和为 {c['weight_sum']} < 0；这些行使用原始界值时"
+        f"边权之和为 {original_weight_sum}，环长 {cycle_len}，每条边至少要分担 "
+        f"⌈{-original_weight_sum}/{cycle_len}⌉ = {required} 分钟的统一放宽才能弥合，"
+        f"故最小容差不能小于 {k}。"
+    )
+    _stringify_tolerance_conflict(c)
+
     result["blocking_conflict"] = {
-        "message": (
-            f"把统一容差缩小到 k−1 = {t} 分钟时，下列 {cycle_len} 条原始行（{t} 分钟扩展界）"
-            f"再次形成闭合负环：扩展界边权之和为 {c['weight_sum']} < 0；这些行使用原始界值时"
-            f"边权之和为 {original_weight_sum}，环长 {cycle_len}，每条边至少要分担 "
-            f"⌈{-original_weight_sum}/{cycle_len}⌉ = {required} 分钟的统一放宽才能弥合，"
-            f"故最小容差不能小于 {k}。"
-        ),
+        "message": message,
         "conflict": c,
     }
     return result
 
 
 def _tolerance_ok_result(rows: list[Row], k: int, system: dict, original_feasible: bool) -> dict:
-    """构造容差评估可行时的公开返回（扩展后时间线 + 每行原/扩展区间与实际差值）。"""
+    """构造容差评估可行时的公开返回（扩展后时间线 + 每行原/扩展区间与实际差值）。
+
+    分钟字段（k、时间线分钟、原/扩展区间端点、放宽量、实际差值与两端富余）按
+    /api/tolerance 协议一律输出十进制字符串；行号与计数保持数值，布尔保持布尔。
+    """
     names = system["names"]
     minutes = system["minutes"]
     index = system["index"]
     dist = system["dist"]
 
-    timeline = [{"event": names[i], "minute": minutes[i]} for i in range(len(names))]
-    timeline.sort(key=lambda x: (x["minute"], x["event"]))
+    order = sorted(range(len(names)), key=lambda i: (minutes[i], names[i]))
+    timeline = [{"event": names[i], "minute": str(minutes[i])} for i in order]
 
     row_results: list[dict] = []
     for r in rows:
@@ -2717,15 +2755,15 @@ def _tolerance_ok_result(rows: list[Row], k: int, system: dict, original_feasibl
             "line": r.line,
             "a": r.a,
             "b": r.b,
-            "low": r.low,
-            "high": r.high,
-            "expanded_low": exp_low,
-            "expanded_high": exp_high,
-            "low_shift": k,
-            "high_shift": k,
-            "actual": actual,
-            "lower_slack": actual - exp_low,
-            "upper_slack": exp_high - actual,
+            "low": str(r.low),
+            "high": str(r.high),
+            "expanded_low": str(exp_low),
+            "expanded_high": str(exp_high),
+            "low_shift": str(k),
+            "high_shift": str(k),
+            "actual": str(actual),
+            "lower_slack": str(actual - exp_low),
+            "upper_slack": str(exp_high - actual),
             "fits_original": r.low <= actual <= r.high,
             "fits_expanded": exp_low <= actual <= exp_high,
         })
@@ -2743,7 +2781,7 @@ def _tolerance_ok_result(rows: list[Row], k: int, system: dict, original_feasibl
 
     return {
         "status": "ok",
-        "k": k,
+        "k": str(k),
         "original_feasible": original_feasible,
         "total_lines": len(rows),
         "event_count": len(names),

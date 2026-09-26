@@ -2244,9 +2244,18 @@ clockRecordsEl.addEventListener("input", () => {
 
 // ---------- 全局容差评估 ----------
 
-// 容差冲突链的标签：同时显示原界与 k−1 时实际使用的扩展界
+// /api/tolerance 协议：所有“分钟”字段（k、时间线分钟、原/扩展区间端点、放宽量、
+// 实际差值、富余、冲突链的边权与界值、环权之和、所需容差等）一律为十进制字符串，
+// 计数（事件数、行数、环长）与行号保持数值。分钟可能超出 Number.MAX_SAFE_INTEGER
+// （如 9007199254740993），一律用 BigInt 按整数运算，展示时直接输出其十进制字符串，
+// 全程不经过 Number，零容差（k = "0"）与负数分钟同样精确。
+function toBigInt(v) {
+  return BigInt(v);
+}
+
+// 容差冲突链的标签：同时显示原界与 k−1 时实际使用的扩展界（均为分钟字符串，直接展示）
 function toleranceStepTagHtml(s) {
-  return `<span class="tag ${s.kind}">第 ${s.line} 行 · ${esc(s.kind_label)}：原界 ${s.original_bound} → 扩展界 ${s.expanded_bound}</span>`;
+  return `<span class="tag ${s.kind}">第 ${s.line} 行 · ${esc(s.kind_label)}：原界 ${esc(s.original_bound)} → 扩展界 ${esc(s.expanded_bound)}</span>`;
 }
 
 // k−1 时的闭合冲突链：每环标注原始行号、原界与所用扩展界值，最后回到起点
@@ -2270,24 +2279,30 @@ function toleranceConflictChainHtml(c) {
 
 function renderToleranceConflictBlock(bc) {
   const c = bc.conflict;
+  // 分钟字段为十进制字符串：按 BigInt 整数参与公式运算，计数（环长）与行号为数值
+  const origSum = toBigInt(c.original_weight_sum);   // 环上原界权之和 W（< 0）
+  const weightSum = toBigInt(c.weight_sum);          // k−1 时的扩展界环权之和（< 0）
+  const cycleLen = BigInt(c.cycle_length);           // 环长 L（计数，数值传输）
+  const requiredK = toBigInt(c.required_k);          // ⌈−W/L⌉，恰为最小容差 k
+  const slackTested = toBigInt(c.slack_tested);      // k−1（分钟）
   const detailRows = c.steps.map((s) => `
     <tr>
       <td class="num">第 ${s.line} 行</td>
       <td>${esc(s.from)} → ${esc(s.to)}</td>
       <td><span class="tag ${s.kind}">${esc(s.kind_label)}</span></td>
-      <td class="num">${s.original_bound}</td>
-      <td class="num">${s.expanded_bound}</td>
+      <td class="num">${esc(s.original_bound)}</td>
+      <td class="num">${esc(s.expanded_bound)}</td>
       <td>${esc(s.relation)}</td>
     </tr>`).join("");
 
   return `
     <div class="card">
-      <h3>为何不能再缩小：k−1 = ${c.slack_tested} 分钟时的闭合冲突链</h3>
+      <h3>为何不能再缩小：k−1 = ${slackTested} 分钟时的闭合冲突链</h3>
       <p>${esc(bc.message)}</p>
       ${toleranceConflictChainHtml(c)}
     </div>
     <div class="card">
-      <h3>冲突环用到的原始行与扩展界值（k−1 = ${c.slack_tested} 分钟）</h3>
+      <h3>冲突环用到的原始行与扩展界值（k−1 = ${slackTested} 分钟）</h3>
       <table>
         <thead><tr>
           <th class="num">原始行号</th><th>图中方向</th><th>使用的界</th>
@@ -2295,16 +2310,17 @@ function renderToleranceConflictBlock(bc) {
         </tr></thead>
         <tbody>${detailRows}</tbody>
       </table>
-      <p class="muted">环上 ${c.cycle_length} 条边的原界权之和为 <strong>${c.original_weight_sum} &lt; 0</strong>
-      （原约束矛盾）；统一放宽 k 分钟使每条边权增加 k，环权变为 ${c.original_weight_sum} + ${c.cycle_length}k。
-      要使其 ≥ 0 需 k ≥ ⌈${-c.original_weight_sum}/${c.cycle_length}⌉ = <strong>${c.required_k}</strong>，
-      恰为求出的最小容差；k−1 = ${c.slack_tested} 时环权仍为 ${c.weight_sum} &lt; 0，故不能再缩小。</p>
+      <p class="muted">环上 ${cycleLen} 条边的原界权之和为 <strong>${origSum} &lt; 0</strong>
+      （原约束矛盾）；统一放宽 k 分钟使每条边权增加 k，环权变为 ${origSum} + ${cycleLen}k。
+      要使其 ≥ 0 需 k ≥ ⌈${-origSum}/${cycleLen}⌉ = <strong>${requiredK}</strong>，
+      恰为求出的最小容差；k−1 = ${slackTested} 时环权仍为 ${weightSum} &lt; 0，故不能再缩小。</p>
     </div>`;
 }
 
 function renderTolerance(data) {
-  const k = data.k;
-  const banner = k === 0
+  // k 为分钟字段（十进制字符串）：按 BigInt 参与全部比较与运算，零容差分支即 k === 0n
+  const k = toBigInt(data.k);
+  const banner = k === 0n
     ? `
     <div class="banner ok">
       <h2>✓ 最小容差 k = 0 分钟</h2>
@@ -2317,16 +2333,24 @@ function renderTolerance(data) {
     </div>`;
 
   const rowRows = data.rows.map((r) => {
-    const expFit = r.low - k <= r.actual && r.actual <= r.high + k;
+    // 区间端点与实际差值均为分钟字符串：扩展区间、两端富余与满足判定全部按 BigInt 整数计算
+    const low = toBigInt(r.low);
+    const high = toBigInt(r.high);
+    const actual = toBigInt(r.actual);
+    const expLow = low - k;
+    const expHigh = high + k;
+    const lowerSlack = actual - expLow;
+    const upperSlack = expHigh - actual;
+    const expFit = expLow <= actual && actual <= expHigh;
     const origFit = r.fits_original;
     return `<tr${origFit ? "" : ' class="combo-conflict"'}>
       <td class="num">${r.line}</td>
       <td>${esc(r.a)} → ${esc(r.b)}</td>
-      <td class="num">[${r.low}, ${r.high}]</td>
-      <td class="num">[${r.expanded_low}, ${r.expanded_high}]</td>
-      <td class="num">−${r.low_shift} / +${r.high_shift}</td>
-      <td class="num">${r.actual}</td>
-      <td class="num">${r.lower_slack} / ${r.upper_slack}</td>
+      <td class="num">[${esc(r.low)}, ${esc(r.high)}]</td>
+      <td class="num">[${expLow}, ${expHigh}]</td>
+      <td class="num">−${esc(r.low_shift)} / +${esc(r.high_shift)}</td>
+      <td class="num">${esc(r.actual)}</td>
+      <td class="num">${lowerSlack} / ${upperSlack}</td>
       <td>${origFit ? '<span class="ok-text">本来就满足</span>' : '<span class="tag unlocated">原区间不满足</span>'}</td>
       <td>${expFit ? '<span class="ok-text">满足</span>' : '<span style="color:var(--err)">不满足</span>'}</td>
     </tr>`;
@@ -2352,7 +2376,7 @@ function renderTolerance(data) {
 
   toleranceEl.innerHTML = banner
     + `<div class="card">
-         <h3>${k === 0 ? "原文的一条可行时间线" : `扩展 k = ${k} 分钟后的一条可行时间线`}</h3>
+         <h3>${k === 0n ? "原文的一条可行时间线" : `扩展 k = ${k} 分钟后的一条可行时间线`}</h3>
          ${timelineTableHtml(data.timeline)}
        </div>`
     + rowsCard
